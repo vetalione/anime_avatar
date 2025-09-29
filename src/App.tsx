@@ -56,48 +56,70 @@ function App() {
       setGenerationStatus(t.alerts.generating)
       console.log('🌐 Calling /api/generate_google')
 
-      const response = await fetch('/api/generate_google', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageBase64,
-          animeTitle,
-          animeCharacter,
+      // Retry on 429 with exponential backoff
+      const maxRetries = 2
+      let attempt = 0
+      let lastErr: any = null
+      while (attempt <= maxRetries) {
+        const response = await fetch('/api/generate_google', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ imageBase64, animeTitle, animeCharacter })
         })
-      })
 
-      if (!response.ok) {
-        throw new Error(`API error: ${response.status} ${response.statusText}`)
+        let data: any = null
+        try {
+          data = await response.json()
+        } catch {}
+
+        if (response.ok) {
+          if (data?.success && data.image?.dataUrl) {
+            setGeneratedAvatar(data.image.dataUrl)
+            console.log('✅ Avatar generated via Google Gemini!')
+            lastErr = null
+            break
+          }
+          if (data?.images && Array.isArray(data.images) && data.images[0]?.data) {
+            const first = data.images[0]
+            const dataUrl = `data:${first.mime_type || 'image/png'};base64,${first.data}`
+            setGeneratedAvatar(dataUrl)
+            console.log('✅ Avatar generated via Google Gemini (array payload)!')
+            lastErr = null
+            break
+          }
+          lastErr = new Error(data?.error || 'Failed to generate avatar')
+          break
+        } else if (response.status === 429 || data?.errorCode === 'RATE_LIMIT_ERROR') {
+          if (attempt < maxRetries) {
+            const delay = Math.pow(2, attempt) * 1000 + Math.random() * 250
+            await new Promise((r) => setTimeout(r, delay))
+            attempt++
+            continue
+          } else {
+            lastErr = new Error('RATE_LIMIT_ERROR')
+            break
+          }
+        } else {
+          lastErr = new Error(data?.error || `API error: ${response.status} ${response.statusText}`)
+          break
+        }
       }
 
-      const data = await response.json()
-
-      if (data.success && data.image?.dataUrl) {
-        setGeneratedAvatar(data.image.dataUrl)
-        console.log('✅ Avatar generated via Google Gemini!')
-      } else if (data.images && Array.isArray(data.images) && data.images[0]?.data) {
-        // Fallback to previous shape if returned as array
-        const first = data.images[0]
-        const dataUrl = `data:${first.mime_type || 'image/png'};base64,${first.data}`
-        setGeneratedAvatar(dataUrl)
-        console.log('✅ Avatar generated via Google Gemini (array payload)!')
-      } else {
-        throw new Error(data.error || 'Failed to generate avatar')
-      }
+      if (lastErr) throw lastErr
       
     } catch (error) {
       console.error('❌ Generation error:', error)
       let errorMessage = t.alerts.generationError
       
       if (error instanceof Error) {
-        if (error.message.includes('billing') || error.message.includes('BILLING_ERROR')) {
+        if (error.message.includes('RATE_LIMIT_ERROR')) {
+          errorMessage = language === 'ru'
+            ? 'Превышен лимит запросов Google. Попробуйте позже.'
+            : 'Google rate limit exceeded. Please try again later.'
+        } else if (error.message.includes('billing') || error.message.includes('BILLING_ERROR')) {
           errorMessage = language === 'ru' 
             ? 'Ошибка биллинга. Проверьте баланс аккаунта.' 
             : 'Billing error. Please check your account balance.'
-        } else if (error.message.includes('rate_limit') || error.message.includes('RATE_LIMIT_ERROR')) {
-          errorMessage = language === 'ru'
-            ? 'Превышен лимит запросов. Попробуйте позже.'
-            : 'Rate limit exceeded. Please try again later.'
         } else if (error.message.includes('content_policy') || error.message.includes('CONTENT_POLICY_ERROR')) {
           errorMessage = language === 'ru'
             ? 'Нарушение политики контента. Попробуйте другое изображение.'

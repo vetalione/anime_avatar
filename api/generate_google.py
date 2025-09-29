@@ -1,6 +1,8 @@
 import base64
 import json
 import os
+import time
+import random
 from http.server import BaseHTTPRequestHandler
 from google import genai
 from google.genai import types
@@ -20,6 +22,10 @@ class handler(BaseHTTPRequestHandler):
                 self.send_header(k, v)
         self.end_headers()
 
+    def _write_json(self, payload, status=200):
+        self._set_headers(status)
+        self.wfile.write(json.dumps(payload).encode("utf-8"))
+
     def do_OPTIONS(self):
         self._set_headers(200)
         self.wfile.write(b"")
@@ -38,11 +44,7 @@ class handler(BaseHTTPRequestHandler):
             anime_character = body.get('animeCharacter')
 
             if not image_base64 or not anime_title:
-                self._set_headers(400)
-                self.wfile.write(json.dumps({
-                    'error': 'Missing required fields: imageBase64 and animeTitle'
-                }).encode('utf-8'))
-                return
+                return self._write_json({'error': 'Missing required fields: imageBase64 and animeTitle'}, 400)
 
             # Decode image data URL or plain base64
             mime_type = 'image/jpeg'
@@ -57,9 +59,7 @@ class handler(BaseHTTPRequestHandler):
                 else:
                     image_bytes = base64.b64decode(image_base64)
             except Exception:
-                self._set_headers(400)
-                self.wfile.write(json.dumps({'error': 'Invalid imageBase64'}).encode('utf-8'))
-                return
+                return self._write_json({'error': 'Invalid imageBase64'}, 400)
 
             # Build prompt
             instruction = (
@@ -80,34 +80,60 @@ class handler(BaseHTTPRequestHandler):
             client = genai.Client(api_key=GEMINI_API_KEY)
             contents = [types.Content(role='user', parts=parts)]
             config = types.GenerateContentConfig(response_modalities=['IMAGE'])
-            result = client.models.generate_content(
-                model=MODEL_ID,
-                contents=contents,
-                config=config,
-            )
+
+            # Retry with exponential backoff on 429
+            delay = 1.0
+            max_retries = 3
+            last_error = None
+            for attempt in range(max_retries):
+                try:
+                    result = client.models.generate_content(
+                        model=MODEL_ID,
+                        contents=contents,
+                        config=config,
+                    )
+                    last_error = None
+                    break
+                except Exception as e:
+                    status = getattr(getattr(e, 'response', None), 'status_code', None)
+                    message = str(e)
+                    if status == 429 or '429' in message or 'Too Many Requests' in message:
+                        last_error = e
+                        if attempt < max_retries - 1:
+                            time.sleep(delay + random.uniform(0, 0.25))
+                            delay *= 2
+                            continue
+                        else:
+                            return self._write_json({
+                                'success': False,
+                                'error': 'Rate limit exceeded. Please try again later.',
+                                'errorCode': 'RATE_LIMIT_ERROR'
+                            }, 429)
+                    else:
+                        return self._write_json({
+                            'success': False,
+                            'error': f'Gemini error: {message}'
+                        }, 500)
+
+            if last_error is not None:
+                return self._write_json({'error': 'Failed after retries'}, 500)
 
             if not getattr(result, 'candidates', None):
-                self._set_headers(500)
-                self.wfile.write(json.dumps({'error': 'No candidates returned'}).encode('utf-8'))
-                return
+                return self._write_json({'error': 'No candidates returned'}, 500)
 
             for p in result.candidates[0].content.parts:
                 inline = getattr(p, 'inline_data', None)
                 if inline and inline.data:
                     out_mime = inline.mime_type or 'image/png'
                     b64_image = base64.b64encode(inline.data).decode('utf-8')
-                    self._set_headers(200)
-                    self.wfile.write(json.dumps({
+                    return self._write_json({
                         'success': True,
                         'image': {
                             'dataUrl': f'data:{out_mime};base64,{b64_image}',
                             'mimeType': out_mime,
                         }
-                    }).encode('utf-8'))
-                    return
+                    }, 200)
 
-            self._set_headers(500)
-            self.wfile.write(json.dumps({'error': 'No image generated'}).encode('utf-8'))
+            return self._write_json({'error': 'No image generated'}, 500)
         except Exception as e:
-            self._set_headers(500)
-            self.wfile.write(json.dumps({'error': f'Gemini error: {str(e)}'}).encode('utf-8'))
+            return self._write_json({'error': f'Gemini error: {str(e)}'}, 500)
