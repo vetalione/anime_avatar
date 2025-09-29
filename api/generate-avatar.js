@@ -28,9 +28,9 @@ export default async function handler(req, res) {
     console.log('🎌 Starting avatar generation:', { animeTitle, animeCharacter, language });
 
     // Инициализируем AI сервисы
-    const genAI = new GoogleGenerativeAI(process.env.VITE_GOOGLE_AI_API_KEY);
+    const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY);
     const openai = new OpenAI({
-      apiKey: process.env.VITE_OPENAI_API_KEY
+      apiKey: process.env.OPENAI_API_KEY
     });
 
     // Шаг 1: Анализируем фото с Gemini
