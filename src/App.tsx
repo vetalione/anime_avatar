@@ -2,8 +2,6 @@ import React, { useState, useEffect } from 'react'
 import './App.css'
 import { translations } from './translations'
 import { Translations, Language } from './types'
-import { GoogleGenerativeAI } from '@google/generative-ai'
-import OpenAI from 'openai'
 
 function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
@@ -46,10 +44,6 @@ function App() {
     setGenerationStatus(t.alerts.analyzing)
     
     try {
-      // Initialize Google AI for image analysis
-      const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GOOGLE_AI_API_KEY)
-      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" })
-      
       // Convert image to base64
       const imageBase64 = await new Promise<string>((resolve) => {
         const reader = new FileReader()
@@ -57,75 +51,51 @@ function App() {
         reader.readAsDataURL(selectedFile)
       })
       
-      // First, analyze the image with Gemini to get person's features
-      const analysisPrompt = `Analyze this photo and describe the person's key facial features, expression, and overall appearance in detail. Focus on features that would be important for creating an anime avatar.`
-      
-      const imagePart = {
-        inlineData: {
-          data: imageBase64.split(',')[1],
-          mimeType: selectedFile.type,
-        },
-      }
-      
-      console.log('Analyzing image with Gemini...')
-      const analysisResult = await model.generateContent([analysisPrompt, imagePart])
-      const analysisResponse = await analysisResult.response
-      const personDescription = analysisResponse.text()
-      
-      console.log('Person analysis:', personDescription)
-      
-      // Now create DALL-E prompt based on analysis and user input
-      const basePrompt = `Create a high-quality anime avatar in ${animeTitle} art style`
-      const characterPrompt = animeCharacter 
-        ? ` resembling ${animeCharacter}` 
-        : ''
-      const featuresPrompt = ` with the following characteristics: ${personDescription}`
-      const stylePrompt = `. Art style: vibrant colors, detailed anime/manga illustration, professional digital art, ${animeTitle} aesthetic, beautiful lighting, high resolution, masterpiece quality`
-      
-      const dallePrompt = basePrompt + characterPrompt + featuresPrompt + stylePrompt
-      
-      console.log('DALL-E prompt:', dallePrompt)
-      
       setGenerationStatus(t.alerts.generating)
       
-      // Initialize OpenAI and generate image
-      const openai = new OpenAI({
-        apiKey: import.meta.env.VITE_OPENAI_API_KEY,
-        dangerouslyAllowBrowser: true // Note: In production, use a backend proxy
+      // Call our Vercel API function
+      const response = await fetch('/api/generate-avatar', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          imageBase64,
+          animeTitle,
+          animeCharacter,
+          language
+        })
       })
       
-      console.log('Generating image with DALL-E 3...')
-      const imageResponse = await openai.images.generate({
-        model: "dall-e-3",
-        prompt: dallePrompt,
-        n: 1,
-        size: "1024x1024",
-        quality: "hd",
-        style: "vivid"
-      })
+      const data = await response.json()
       
-      const generatedImageUrl = imageResponse.data?.[0]?.url
-      
-      if (generatedImageUrl) {
-        setGeneratedAvatar(generatedImageUrl)
-        console.log('Image generated successfully!')
+      if (data.success && data.imageUrl) {
+        setGeneratedAvatar(data.imageUrl)
+        console.log('✅ Avatar generated successfully!')
+        if (data.analysis) {
+          console.log('👤 Character analysis:', data.analysis)
+        }
       } else {
-        throw new Error('No image URL received from DALL-E')
+        throw new Error(data.error || 'Failed to generate avatar')
       }
       
     } catch (error) {
-      console.error('Generation error:', error)
+      console.error('❌ Generation error:', error)
       let errorMessage = t.alerts.generationError
       
       if (error instanceof Error) {
-        if (error.message.includes('billing')) {
+        if (error.message.includes('billing') || error.message.includes('BILLING_ERROR')) {
           errorMessage = language === 'ru' 
             ? 'Ошибка биллинга OpenAI. Проверьте баланс аккаунта.' 
             : 'OpenAI billing error. Please check your account balance.'
-        } else if (error.message.includes('rate_limit')) {
+        } else if (error.message.includes('rate_limit') || error.message.includes('RATE_LIMIT_ERROR')) {
           errorMessage = language === 'ru'
             ? 'Превышен лимит запросов. Попробуйте позже.'
             : 'Rate limit exceeded. Please try again later.'
+        } else if (error.message.includes('content_policy') || error.message.includes('CONTENT_POLICY_ERROR')) {
+          errorMessage = language === 'ru'
+            ? 'Нарушение политики контента. Попробуйте другое изображение.'
+            : 'Content policy violation. Please try a different image.'
         }
       }
       

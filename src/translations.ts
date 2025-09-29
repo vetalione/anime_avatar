@@ -31,8 +31,9 @@ export const translations: Record<string, Translations> = {
       missingFields: "Пожалуйста, выберите фото и укажите название аниме!",
       generationComplete: "Аниме аватар успешно сгенерирован!",
       generationError: "Ошибка при генерации аватара. Попробуйте снова.",
-      analyzing: "Анализируем фото...",
-      generating: "Генерируем аниме аватар..."
+      analyzing: "Анализируем фото с помощью ИИ...",
+      generating: "Создаем уникальный аниме аватар...",
+      processing: "Обрабатываем запрос..."
     },
     alt: {
       selectedPhoto: "Выбранное фото",
@@ -69,8 +70,9 @@ export const translations: Record<string, Translations> = {
       missingFields: "Please select a photo and specify anime title!",
       generationComplete: "Anime avatar generated successfully!",
       generationError: "Error generating avatar. Please try again.",
-      analyzing: "Analyzing photo...",
-      generating: "Generating anime avatar..."
+      analyzing: "Analyzing photo with AI...",
+      generating: "Creating unique anime avatar...",
+      processing: "Processing request..."
     },
     alt: {
       selectedPhoto: "Selected photo",

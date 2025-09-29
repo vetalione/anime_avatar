@@ -38,6 +38,7 @@ export interface Translations {
     generationError: string;
     analyzing: string;
     generating: string;
+    processing: string;
   };
   alt: {
     selectedPhoto: string;
