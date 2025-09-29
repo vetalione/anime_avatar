@@ -16,7 +16,7 @@ class handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Idempotency-Key, X-Client-Source")
         if extra:
             for k, v in extra.items():
                 self.send_header(k, v)
@@ -80,12 +80,13 @@ class handler(BaseHTTPRequestHandler):
                         "role": "user",
                         "parts": [
                             {"text": instruction},
-                            {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode("utf-8")}},
+                            {"inlineData": {"mimeType": mime_type, "data": base64.b64encode(image_bytes).decode("utf-8")}},
                         ],
                     }
                 ],
-                "generation_config": {
-                    "candidate_count": 1,
+                "generationConfig": {
+                    "candidateCount": 1,
+                    "responseMimeType": "image/png"
                 },
             }
 
@@ -94,21 +95,19 @@ class handler(BaseHTTPRequestHandler):
                 "Content-Type": "application/json",
             }
 
-            # Retry with exponential backoff on 429
-            delay = 1.0
-            max_retries = 2
-            for attempt in range(max_retries):
-                resp = requests.post(API_URL, headers=headers, json=payload, timeout=60)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    # Parse first inline image
-                    try:
-                        parts = data["candidates"][0]["content"]["parts"]
-                        for part in parts:
-                            inline = part.get("inline_data")
-                            if inline and inline.get("data"):
-                                out_mime = inline.get("mime_type", "image/png")
-                                b64_image = inline["data"]
+            # Single attempt (avoid extra load)
+            resp = requests.post(API_URL, headers=headers, json=payload, timeout=60)
+            if resp.status_code == 200:
+                data = resp.json()
+                try:
+                    parts = data["candidates"][0]["content"]["parts"]
+                    # Look for inline image (support both key styles)
+                    for part in parts:
+                        inline = part.get("inlineData") or part.get("inline_data")
+                        if inline and (inline.get("data") or inline.get("data") == ""):
+                            b64_image = inline.get("data")
+                            if b64_image:
+                                out_mime = inline.get("mimeType") or inline.get("mime_type") or "image/png"
                                 return self._write_json({
                                     'success': True,
                                     'image': {
@@ -116,40 +115,33 @@ class handler(BaseHTTPRequestHandler):
                                         'mimeType': out_mime,
                                     }
                                 }, 200)
-                        # If there is text only
-                        text_parts = [p.get("text") for p in parts if p.get("text")]
-                        if text_parts:
-                            return self._write_json({'error': text_parts[0] or 'No image generated'}, 500)
-                    except Exception:
-                        pass
-                    return self._write_json({'error': 'No image generated'}, 500)
-                elif resp.status_code == 429 and attempt < max_retries - 1:
-                    retry_after = resp.headers.get('retry-after')
-                    wait = float(retry_after) if retry_after and retry_after.isdigit() else (delay + random.uniform(0, 0.25))
-                    time.sleep(wait)
-                    delay *= 2
-                    continue
-                elif resp.status_code == 429:
-                    retry_after = resp.headers.get('retry-after')
-                    secs = int(retry_after) if retry_after and retry_after.isdigit() else None
-                    return self._write_json({
-                        'success': False,
-                        'error': 'Rate limit exceeded. Please try again later.',
-                        'errorCode': 'RATE_LIMIT_ERROR',
-                        'retryAfterSec': secs,
-                    }, 429)
-                else:
-                    # Forward error details for debugging
-                    try:
-                        err_json = resp.json()
-                    except Exception:
-                        err_json = {'message': resp.text}
-                    return self._write_json({
-                        'success': False,
-                        'error': f'Gemini HTTP {resp.status_code}',
-                        'details': err_json,
-                    }, 500)
+                    # If only text parts present, return diagnostic text
+                    texts = [p.get("text") for p in parts if p.get("text")]
+                    if texts:
+                        return self._write_json({'error': texts[0] or 'No image generated'}, 500)
+                except Exception:
+                    pass
+                return self._write_json({'error': 'No image generated'}, 500)
 
-            return self._write_json({'error': 'Failed after retries'}, 500)
+            elif resp.status_code == 429:
+                retry_after = resp.headers.get('retry-after')
+                secs = int(retry_after) if retry_after and retry_after.isdigit() else None
+                return self._write_json({
+                    'success': False,
+                    'error': 'Rate limit exceeded. Please try again later.',
+                    'errorCode': 'RATE_LIMIT_ERROR',
+                    'retryAfterSec': secs,
+                }, 429)
+            else:
+                # Forward error details for debugging
+                try:
+                    err_json = resp.json()
+                except Exception:
+                    err_json = {'message': resp.text}
+                return self._write_json({
+                    'success': False,
+                    'error': f'Gemini HTTP {resp.status_code}',
+                    'details': err_json,
+                }, 500)
         except Exception as e:
             return self._write_json({'error': f'Gemini error: {str(e)}'}, 500)

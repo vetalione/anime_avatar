@@ -9,7 +9,7 @@ export default async function handler(req, res) {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Client-Source');
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -17,6 +17,9 @@ export default async function handler(req, res) {
 
   try {
     const { imageBase64, animeTitle, animeCharacter } = req.body;
+    const source = req.headers['x-client-source'] || 'unknown';
+    console.log(`[OpenAI] request from: ${String(source)}`);
+
     if (!animeTitle) {
       return res.status(400).json({ error: 'Missing required field: animeTitle' });
     }

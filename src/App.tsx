@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import './App.css'
 import { translations } from './translations'
 import { Translations, Language } from './types'
@@ -15,7 +15,8 @@ function App() {
     const saved = localStorage.getItem('language')
     return (saved === 'en' || saved === 'ru') ? saved : 'ru'
   })
-  
+  const inFlightRef = useRef(false)
+
   const t: Translations = translations[language]
 
   useEffect(() => {
@@ -24,9 +25,7 @@ function App() {
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
-    if (file) {
-      setSelectedFile(file)
-    }
+    if (file) setSelectedFile(file)
   }
 
   const toggleLanguage = () => {
@@ -35,123 +34,112 @@ function App() {
     localStorage.setItem('language', newLanguage)
   }
 
+  const generateKey = () => {
+    const arr = new Uint8Array(16)
+    crypto.getRandomValues(arr)
+    return Array.from(arr).map(b => b.toString(16).padStart(2, '0')).join('')
+  }
+
+  const resizeImageToDataUrl = (file: File, maxDim = 1024, quality = 0.85): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => {
+        const img = new Image()
+        img.onload = () => {
+          const canvas = document.createElement('canvas')
+          let { width, height } = img
+          const scale = Math.min(1, maxDim / Math.max(width, height))
+          width = Math.round(width * scale)
+          height = Math.round(height * scale)
+          canvas.width = width
+          canvas.height = height
+          const ctx = canvas.getContext('2d')
+          if (!ctx) return reject(new Error('Canvas not supported'))
+          ctx.drawImage(img, 0, 0, width, height)
+          const dataUrl = canvas.toDataURL('image/jpeg', quality)
+          resolve(dataUrl)
+        }
+        img.onerror = () => reject(new Error('Image load error'))
+        img.src = reader.result as string
+      }
+      reader.onerror = () => reject(new Error('File read error'))
+      reader.readAsDataURL(file)
+    })
+  }
+
   const handleGenerate = async () => {
     if (!selectedFile || !animeTitle) {
       alert(t.alerts.missingFields)
       return
     }
-
-    console.log(`🚀 Starting avatar generation via ${provider.toUpperCase()} endpoint...`)
+    if (inFlightRef.current) return
+    inFlightRef.current = true
 
     setIsGenerating(true)
     setGenerationStatus(t.alerts.analyzing)
-    
+
     try {
-      // Convert image to base64
-      const imageBase64 = await new Promise<string>((resolve) => {
-        const reader = new FileReader()
-        reader.onload = () => resolve(reader.result as string)
-        reader.readAsDataURL(selectedFile)
-      })
-      
+      // Resize image to reduce payload and API pressure
+      const imageBase64 = await resizeImageToDataUrl(selectedFile, 1024, 0.85)
       setGenerationStatus(t.alerts.generating)
+
       const endpoint = provider === 'gemini' ? '/api/generate_google' : '/api/generate-avatar'
-      console.log('🌐 Calling', endpoint)
-
-      // Retry on 429 with exponential backoff
-      const maxRetries = 2
-      let attempt = 0
-      let lastErr: any = null
-      while (attempt <= maxRetries) {
-        const bodyPayload: Record<string, any> = {
-          animeTitle,
-          animeCharacter,
-        }
-        // Always send selfie to let backend infer gender/features
-        if (provider === 'gemini' || provider === 'openai') {
-          bodyPayload.imageBase64 = imageBase64
-        }
-
-        const response = await fetch(endpoint, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(bodyPayload)
-        })
-
-        let data: any = null
-        try { data = await response.json() } catch {}
-
-        if (response.ok) {
-          // Gemini shape
-          if (data?.success && data.image?.dataUrl) {
-            setGeneratedAvatar(data.image.dataUrl)
-            console.log('✅ Avatar generated via Gemini!')
-            lastErr = null
-            break
-          }
-          // OpenAI shape
-          if (data?.success && data.imageUrl) {
-            setGeneratedAvatar(data.imageUrl)
-            console.log('✅ Avatar generated via OpenAI!')
-            lastErr = null
-            break
-          }
-          // Legacy Gemini array shape
-          if (data?.images && Array.isArray(data.images) && data.images[0]?.data) {
-            const first = data.images[0]
-            const dataUrl = `data:${first.mime_type || 'image/png'};base64,${first.data}`
-            setGeneratedAvatar(dataUrl)
-            console.log('✅ Avatar generated via Gemini (array payload)!')
-            lastErr = null
-            break
-          }
-          lastErr = new Error(data?.error || 'Failed to generate avatar')
-          break
-        } else {
-          const isRateLimit = response.status === 429 || data?.errorCode === 'RATE_LIMIT_ERROR'
-          if (isRateLimit) {
-            const retryAfterSec = Number(data?.retryAfterSec) || null
-            if (attempt < maxRetries) {
-              const delay = retryAfterSec ? retryAfterSec * 1000 : (Math.pow(2, attempt) * 1000 + Math.random() * 250)
-              await new Promise((r) => setTimeout(r, delay))
-              attempt++
-              continue
-            } else {
-              lastErr = new Error('RATE_LIMIT_ERROR')
-              break
-            }
-          }
-          lastErr = new Error(data?.error || `API error: ${response.status} ${response.statusText}`)
-          break
-        }
+      const idempotencyKey = generateKey()
+      const bodyPayload: Record<string, any> = {
+        animeTitle,
+        animeCharacter,
+        imageBase64,
       }
 
-      if (lastErr) throw lastErr
-      
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Client-Source': 'anime-avatar-app', 'Idempotency-Key': idempotencyKey },
+        body: JSON.stringify(bodyPayload)
+      })
+
+      const data = await response.json().catch(() => ({}))
+
+      if (response.ok) {
+        // Gemini shape
+        if (data?.success && data.image?.dataUrl) {
+          setGeneratedAvatar(data.image.dataUrl)
+          return
+        }
+        // OpenAI shape
+        if (data?.success && data.imageUrl) {
+          setGeneratedAvatar(data.imageUrl)
+          return
+        }
+        // Legacy Gemini array shape
+        if (data?.images && Array.isArray(data.images) && data.images[0]?.data) {
+          const first = data.images[0]
+          const dataUrl = `data:${first.mime_type || 'image/png'};base64,${first.data}`
+          setGeneratedAvatar(dataUrl)
+          return
+        }
+        throw new Error(data?.error || 'Failed to generate avatar')
+      }
+
+      // Non-OK
+      if (response.status === 429 || data?.errorCode === 'RATE_LIMIT_ERROR') {
+        const msg = language === 'ru'
+          ? 'Превышен лимит запросов. Подождите немного и попробуйте снова.'
+          : 'Rate limit exceeded. Please wait and try again.'
+        throw new Error(msg)
+      }
+      throw new Error(data?.error || `API error: ${response.status} ${response.statusText}`)
+
     } catch (error) {
       console.error('❌ Generation error:', error)
       let errorMessage = t.alerts.generationError
-      
-      if (error instanceof Error) {
-        if (error.message.includes('RATE_LIMIT_ERROR')) {
-          errorMessage = language === 'ru'
-            ? 'Превышен лимит запросов. Попробуйте позже.'
-            : 'Rate limit exceeded. Please try again later.'
-        } else if (error.message.includes('billing') || error.message.includes('BILLING_ERROR')) {
-          errorMessage = language === 'ru' 
-            ? 'Ошибка биллинга. Проверьте баланс аккаунта.' 
-            : 'Billing error. Please check your account balance.'
-        } else if (error.message.includes('content_policy') || error.message.includes('CONTENT_POLICY_ERROR')) {
-          errorMessage = language === 'ru'
-            ? 'Нарушение политики контента. Попробуйте другое изображение.'
-            : 'Content policy violation. Please try a different image.'
-        }
+      if (error instanceof Error && error.message) {
+        errorMessage = error.message
       }
-      
       alert(errorMessage)
     } finally {
       setIsGenerating(false)
       setGenerationStatus('')
+      inFlightRef.current = false
     }
   }
 
