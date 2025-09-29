@@ -25,13 +25,17 @@ export default async function handler(req, res) {
 
     const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-    // Build prompt for DALL-E
-    const basePrompt = `Create a high-quality anime avatar in ${animeTitle} art style`;
-    const characterPrompt = animeCharacter ? ` resembling ${animeCharacter}` : '';
-    const stylePrompt = `. Style: vibrant colors, detailed anime/manga illustration, professional digital art, ${animeTitle} aesthetic, beautiful lighting, masterpiece quality, sharp focus`;
-    const dallePrompt = (basePrompt + characterPrompt + stylePrompt).substring(0, 1000);
+    // Улучшенный промпт для DALL-E с акцентом на стиль конкретного аниме
+    let dallePrompt = `Create a portrait of an original character in the exact visual style of the anime '${animeTitle}'.`;
+    if (animeCharacter) {
+      dallePrompt += ` The character should resemble '${animeCharacter}' from '${animeTitle}', but as a unique anime avatar.`;
+    }
+    dallePrompt += ` Use the same color palette, line art, shading, and composition typical for '${animeTitle}'.`;
+    dallePrompt += ` The result must be indistinguishable from official '${animeTitle}' artwork. No text, no watermark, no signature. Only the character, upper body, clean background.`;
+    dallePrompt += ` High resolution, masterpiece, trending on pixiv, professional digital art.`;
+    dallePrompt = dallePrompt.substring(0, 1000);
 
-    console.log('🎨 DALL-E prompt prepared:', dallePrompt.substring(0, 100) + '...');
+    console.log('🎨 DALL-E prompt prepared:', dallePrompt.substring(0, 200) + '...');
 
     // Generate image with DALL-E 3
     const imageResponse = await openai.images.generate({
