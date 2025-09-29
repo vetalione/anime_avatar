@@ -81,10 +81,11 @@ class handler(BaseHTTPRequestHandler):
             contents = [types.Content(role='user', parts=parts)]
             config = types.GenerateContentConfig(response_modalities=['IMAGE'])
 
-            # Retry with exponential backoff on 429
+            # Retry with exponential backoff on 429 (short to avoid hammering)
             delay = 1.0
-            max_retries = 3
+            max_retries = 2
             last_error = None
+            result = None
             for attempt in range(max_retries):
                 try:
                     result = client.models.generate_content(
@@ -96,6 +97,11 @@ class handler(BaseHTTPRequestHandler):
                     break
                 except Exception as e:
                     status = getattr(getattr(e, 'response', None), 'status_code', None)
+                    retry_after = None
+                    try:
+                        retry_after = getattr(getattr(e, 'response', None), 'headers', {}).get('retry-after')
+                    except Exception:
+                        retry_after = None
                     message = str(e)
                     if status == 429 or '429' in message or 'Too Many Requests' in message:
                         last_error = e
@@ -104,16 +110,28 @@ class handler(BaseHTTPRequestHandler):
                             delay *= 2
                             continue
                         else:
-                            return self._write_json({
+                            # Return explicit 429 with retryAfterSec when available
+                            secs = None
+                            try:
+                                if retry_after is not None:
+                                    secs = int(retry_after)
+                            except Exception:
+                                secs = None
+                            self._set_headers(429)
+                            self.wfile.write(json.dumps({
                                 'success': False,
                                 'error': 'Rate limit exceeded. Please try again later.',
-                                'errorCode': 'RATE_LIMIT_ERROR'
-                            }, 429)
+                                'errorCode': 'RATE_LIMIT_ERROR',
+                                'retryAfterSec': secs
+                            }).encode('utf-8'))
+                            return
                     else:
-                        return self._write_json({
+                        self._set_headers(500)
+                        self.wfile.write(json.dumps({
                             'success': False,
                             'error': f'Gemini error: {message}'
-                        }, 500)
+                        }).encode('utf-8'))
+                        return
 
             if last_error is not None:
                 return self._write_json({'error': 'Failed after retries'}, 500)

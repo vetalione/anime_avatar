@@ -10,6 +10,7 @@ function App() {
   const [generatedAvatar, setGeneratedAvatar] = useState<string | null>(null)
   const [isGenerating, setIsGenerating] = useState(false)
   const [generationStatus, setGenerationStatus] = useState('')
+  const [provider, setProvider] = useState<'gemini' | 'openai'>('gemini')
   const [language, setLanguage] = useState<Language>(() => {
     const saved = localStorage.getItem('language')
     return (saved === 'en' || saved === 'ru') ? saved : 'ru'
@@ -40,7 +41,7 @@ function App() {
       return
     }
 
-    console.log('🚀 Starting avatar generation via Google Gemini endpoint...')
+    console.log(`🚀 Starting avatar generation via ${provider.toUpperCase()} endpoint...`)
 
     setIsGenerating(true)
     setGenerationStatus(t.alerts.analyzing)
@@ -54,52 +55,72 @@ function App() {
       })
       
       setGenerationStatus(t.alerts.generating)
-      console.log('🌐 Calling /api/generate_google')
+      const endpoint = provider === 'gemini' ? '/api/generate_google' : '/api/generate-avatar'
+      console.log('🌐 Calling', endpoint)
 
       // Retry on 429 with exponential backoff
       const maxRetries = 2
       let attempt = 0
       let lastErr: any = null
       while (attempt <= maxRetries) {
-        const response = await fetch('/api/generate_google', {
+        const bodyPayload: Record<string, any> = {
+          animeTitle,
+          animeCharacter,
+        }
+        // Always send selfie to let backend infer gender/features
+        if (provider === 'gemini' || provider === 'openai') {
+          bodyPayload.imageBase64 = imageBase64
+        }
+
+        const response = await fetch(endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ imageBase64, animeTitle, animeCharacter })
+          body: JSON.stringify(bodyPayload)
         })
 
         let data: any = null
-        try {
-          data = await response.json()
-        } catch {}
+        try { data = await response.json() } catch {}
 
         if (response.ok) {
+          // Gemini shape
           if (data?.success && data.image?.dataUrl) {
             setGeneratedAvatar(data.image.dataUrl)
-            console.log('✅ Avatar generated via Google Gemini!')
+            console.log('✅ Avatar generated via Gemini!')
             lastErr = null
             break
           }
+          // OpenAI shape
+          if (data?.success && data.imageUrl) {
+            setGeneratedAvatar(data.imageUrl)
+            console.log('✅ Avatar generated via OpenAI!')
+            lastErr = null
+            break
+          }
+          // Legacy Gemini array shape
           if (data?.images && Array.isArray(data.images) && data.images[0]?.data) {
             const first = data.images[0]
             const dataUrl = `data:${first.mime_type || 'image/png'};base64,${first.data}`
             setGeneratedAvatar(dataUrl)
-            console.log('✅ Avatar generated via Google Gemini (array payload)!')
+            console.log('✅ Avatar generated via Gemini (array payload)!')
             lastErr = null
             break
           }
           lastErr = new Error(data?.error || 'Failed to generate avatar')
           break
-        } else if (response.status === 429 || data?.errorCode === 'RATE_LIMIT_ERROR') {
-          if (attempt < maxRetries) {
-            const delay = Math.pow(2, attempt) * 1000 + Math.random() * 250
-            await new Promise((r) => setTimeout(r, delay))
-            attempt++
-            continue
-          } else {
-            lastErr = new Error('RATE_LIMIT_ERROR')
-            break
-          }
         } else {
+          const isRateLimit = response.status === 429 || data?.errorCode === 'RATE_LIMIT_ERROR'
+          if (isRateLimit) {
+            const retryAfterSec = Number(data?.retryAfterSec) || null
+            if (attempt < maxRetries) {
+              const delay = retryAfterSec ? retryAfterSec * 1000 : (Math.pow(2, attempt) * 1000 + Math.random() * 250)
+              await new Promise((r) => setTimeout(r, delay))
+              attempt++
+              continue
+            } else {
+              lastErr = new Error('RATE_LIMIT_ERROR')
+              break
+            }
+          }
           lastErr = new Error(data?.error || `API error: ${response.status} ${response.statusText}`)
           break
         }
@@ -114,8 +135,8 @@ function App() {
       if (error instanceof Error) {
         if (error.message.includes('RATE_LIMIT_ERROR')) {
           errorMessage = language === 'ru'
-            ? 'Превышен лимит запросов Google. Попробуйте позже.'
-            : 'Google rate limit exceeded. Please try again later.'
+            ? 'Превышен лимит запросов. Попробуйте позже.'
+            : 'Rate limit exceeded. Please try again later.'
         } else if (error.message.includes('billing') || error.message.includes('BILLING_ERROR')) {
           errorMessage = language === 'ru' 
             ? 'Ошибка биллинга. Проверьте баланс аккаунта.' 
@@ -201,6 +222,30 @@ function App() {
             className="character-input"
           />
           <p className="section-description">{t.character.description}</p>
+        </div>
+
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center', margin: '12px 0' }}>
+          <span style={{ opacity: 0.8 }}>{language === 'ru' ? 'Провайдер:' : 'Provider:'}</span>
+          <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <input
+              type="radio"
+              name="provider"
+              value="gemini"
+              checked={provider === 'gemini'}
+              onChange={() => setProvider('gemini')}
+            />
+            Gemini (Google)
+          </label>
+          <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <input
+              type="radio"
+              name="provider"
+              value="openai"
+              checked={provider === 'openai'}
+              onChange={() => setProvider('openai')}
+            />
+            OpenAI (DALL·E)
+          </label>
         </div>
 
         <button 
