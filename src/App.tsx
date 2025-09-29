@@ -3,6 +3,7 @@ import './App.css'
 import { translations } from './translations'
 import { Translations, Language } from './types'
 import { GoogleGenerativeAI } from '@google/generative-ai'
+import OpenAI from 'openai'
 
 function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
@@ -10,6 +11,7 @@ function App() {
   const [animeCharacter, setAnimeCharacter] = useState('')
   const [generatedAvatar, setGeneratedAvatar] = useState<string | null>(null)
   const [isGenerating, setIsGenerating] = useState(false)
+  const [generationStatus, setGenerationStatus] = useState('')
   const [language, setLanguage] = useState<Language>(() => {
     const saved = localStorage.getItem('language')
     return (saved === 'en' || saved === 'ru') ? saved : 'ru'
@@ -41,9 +43,10 @@ function App() {
     }
 
     setIsGenerating(true)
+    setGenerationStatus(t.alerts.analyzing)
     
     try {
-      // Initialize Google AI
+      // Initialize Google AI for image analysis
       const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GOOGLE_AI_API_KEY)
       const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" })
       
@@ -54,42 +57,82 @@ function App() {
         reader.readAsDataURL(selectedFile)
       })
       
-      // Prepare prompt based on user input
-      const basePrompt = `Transform this photo into ${animeTitle} anime style`
-      const characterPrompt = animeCharacter 
-        ? `, making the person look like ${animeCharacter}` 
-        : ', creating a unique character in this anime world'
+      // First, analyze the image with Gemini to get person's features
+      const analysisPrompt = `Analyze this photo and describe the person's key facial features, expression, and overall appearance in detail. Focus on features that would be important for creating an anime avatar.`
       
-      const fullPrompt = basePrompt + characterPrompt + `. Create a beautiful anime avatar that captures the person's essence while staying true to the ${animeTitle} art style. Make it vibrant, detailed, and high-quality.`
-      
-      console.log('Generating with prompt:', fullPrompt)
-      
-      // Generate content with image and text
       const imagePart = {
         inlineData: {
-          data: imageBase64.split(',')[1], // Remove data:image/...;base64, prefix
+          data: imageBase64.split(',')[1],
           mimeType: selectedFile.type,
         },
       }
       
-      const result = await model.generateContent([fullPrompt, imagePart])
-      const response = await result.response
-      const generatedText = response.text()
+      console.log('Analyzing image with Gemini...')
+      const analysisResult = await model.generateContent([analysisPrompt, imagePart])
+      const analysisResponse = await analysisResult.response
+      const personDescription = analysisResponse.text()
       
-      console.log('AI Response:', generatedText)
+      console.log('Person analysis:', personDescription)
       
-      // Since Gemini is text-only, we'll show the description for now
-      // In a real implementation, you'd use an image generation API like DALL-E
-      alert(`${t.alerts.generationComplete}\n\n${generatedText}`)
+      // Now create DALL-E prompt based on analysis and user input
+      const basePrompt = `Create a high-quality anime avatar in ${animeTitle} art style`
+      const characterPrompt = animeCharacter 
+        ? ` resembling ${animeCharacter}` 
+        : ''
+      const featuresPrompt = ` with the following characteristics: ${personDescription}`
+      const stylePrompt = `. Art style: vibrant colors, detailed anime/manga illustration, professional digital art, ${animeTitle} aesthetic, beautiful lighting, high resolution, masterpiece quality`
       
-      // For demo purposes, use a placeholder image
-      setGeneratedAvatar('/placeholder-avatar.png')
+      const dallePrompt = basePrompt + characterPrompt + featuresPrompt + stylePrompt
+      
+      console.log('DALL-E prompt:', dallePrompt)
+      
+      setGenerationStatus(t.alerts.generating)
+      
+      // Initialize OpenAI and generate image
+      const openai = new OpenAI({
+        apiKey: import.meta.env.VITE_OPENAI_API_KEY,
+        dangerouslyAllowBrowser: true // Note: In production, use a backend proxy
+      })
+      
+      console.log('Generating image with DALL-E 3...')
+      const imageResponse = await openai.images.generate({
+        model: "dall-e-3",
+        prompt: dallePrompt,
+        n: 1,
+        size: "1024x1024",
+        quality: "hd",
+        style: "vivid"
+      })
+      
+      const generatedImageUrl = imageResponse.data?.[0]?.url
+      
+      if (generatedImageUrl) {
+        setGeneratedAvatar(generatedImageUrl)
+        console.log('Image generated successfully!')
+      } else {
+        throw new Error('No image URL received from DALL-E')
+      }
       
     } catch (error) {
       console.error('Generation error:', error)
-      alert(t.alerts.generationError || 'Ошибка при генерации аватара. Попробуйте снова.')
+      let errorMessage = t.alerts.generationError
+      
+      if (error instanceof Error) {
+        if (error.message.includes('billing')) {
+          errorMessage = language === 'ru' 
+            ? 'Ошибка биллинга OpenAI. Проверьте баланс аккаунта.' 
+            : 'OpenAI billing error. Please check your account balance.'
+        } else if (error.message.includes('rate_limit')) {
+          errorMessage = language === 'ru'
+            ? 'Превышен лимит запросов. Попробуйте позже.'
+            : 'Rate limit exceeded. Please try again later.'
+        }
+      }
+      
+      alert(errorMessage)
     } finally {
       setIsGenerating(false)
+      setGenerationStatus('')
     }
   }
 
@@ -167,7 +210,7 @@ function App() {
           disabled={!selectedFile || !animeTitle || isGenerating}
           className="generate-button"
         >
-          {isGenerating ? t.generate.generating : t.generate.button}
+          {isGenerating ? (generationStatus || t.generate.generating) : t.generate.button}
         </button>
 
         {generatedAvatar && (
