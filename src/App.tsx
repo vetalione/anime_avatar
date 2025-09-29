@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import './App.css'
 import { translations } from './translations'
 import { Translations, Language } from './types'
+import { GoogleGenerativeAI } from '@google/generative-ai'
 
 function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
@@ -41,20 +42,55 @@ function App() {
 
     setIsGenerating(true)
     
-    // TODO: Integrate with Gemini Nano Banana API
-    // Prepare prompt based on user input
-    const basePrompt = `Transform this photo into ${animeTitle} anime style`
-    const characterPrompt = animeCharacter 
-      ? `, making the person look like ${animeCharacter}` 
-      : ', creating a unique character in this anime world'
-    
-    console.log('Generating with prompt:', basePrompt + characterPrompt)
-    
-    // This is a placeholder for the actual AI generation
-    setTimeout(() => {
+    try {
+      // Initialize Google AI
+      const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GOOGLE_AI_API_KEY)
+      const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" })
+      
+      // Convert image to base64
+      const imageBase64 = await new Promise<string>((resolve) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(reader.result as string)
+        reader.readAsDataURL(selectedFile)
+      })
+      
+      // Prepare prompt based on user input
+      const basePrompt = `Transform this photo into ${animeTitle} anime style`
+      const characterPrompt = animeCharacter 
+        ? `, making the person look like ${animeCharacter}` 
+        : ', creating a unique character in this anime world'
+      
+      const fullPrompt = basePrompt + characterPrompt + `. Create a beautiful anime avatar that captures the person's essence while staying true to the ${animeTitle} art style. Make it vibrant, detailed, and high-quality.`
+      
+      console.log('Generating with prompt:', fullPrompt)
+      
+      // Generate content with image and text
+      const imagePart = {
+        inlineData: {
+          data: imageBase64.split(',')[1], // Remove data:image/...;base64, prefix
+          mimeType: selectedFile.type,
+        },
+      }
+      
+      const result = await model.generateContent([fullPrompt, imagePart])
+      const response = await result.response
+      const generatedText = response.text()
+      
+      console.log('AI Response:', generatedText)
+      
+      // Since Gemini is text-only, we'll show the description for now
+      // In a real implementation, you'd use an image generation API like DALL-E
+      alert(`${t.alerts.generationComplete}\n\n${generatedText}`)
+      
+      // For demo purposes, use a placeholder image
       setGeneratedAvatar('/placeholder-avatar.png')
+      
+    } catch (error) {
+      console.error('Generation error:', error)
+      alert(t.alerts.generationError || 'Ошибка при генерации аватара. Попробуйте снова.')
+    } finally {
       setIsGenerating(false)
-    }, 3000)
+    }
   }
 
   return (

@@ -34,6 +34,8 @@ export interface Translations {
   };
   alerts: {
     missingFields: string;
+    generationComplete: string;
+    generationError: string;
   };
   alt: {
     selectedPhoto: string;
