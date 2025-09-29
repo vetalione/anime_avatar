@@ -1,8 +1,6 @@
 import base64
 import json
 import os
-import time
-import random
 import requests
 from http.server import BaseHTTPRequestHandler
 
@@ -49,7 +47,7 @@ class handler(BaseHTTPRequestHandler):
             if not image_base64 or not anime_title:
                 return self._write_json({'error': 'Missing required fields: imageBase64 and animeTitle'}, 400)
 
-            # Decode image data URL or plain base64
+            # Decode data URL or plain base64
             mime_type = 'image/jpeg'
             try:
                 if isinstance(image_base64, str) and image_base64.startswith('data:'):
@@ -58,9 +56,10 @@ class handler(BaseHTTPRequestHandler):
                         mime_type = header.split(':', 1)[1].split(';', 1)[0]
                     except Exception:
                         mime_type = 'image/jpeg'
-                    image_bytes = base64.b64decode(b64)
+                    image_b64_for_api = b64
                 else:
-                    image_bytes = base64.b64decode(image_base64)
+                    # ensure string for API
+                    image_b64_for_api = image_base64
             except Exception:
                 return self._write_json({'error': 'Invalid imageBase64'}, 400)
 
@@ -80,14 +79,10 @@ class handler(BaseHTTPRequestHandler):
                         "role": "user",
                         "parts": [
                             {"text": instruction},
-                            {"inlineData": {"mimeType": mime_type, "data": base64.b64encode(image_bytes).decode("utf-8")}},
+                            {"inline_data": {"mime_type": mime_type, "data": image_b64_for_api}},
                         ],
                     }
-                ],
-                "generationConfig": {
-                    "candidateCount": 1,
-                    "responseMimeType": "image/png"
-                },
+                ]
             }
 
             headers = {
@@ -95,53 +90,41 @@ class handler(BaseHTTPRequestHandler):
                 "Content-Type": "application/json",
             }
 
-            # Single attempt (avoid extra load)
             resp = requests.post(API_URL, headers=headers, json=payload, timeout=60)
             if resp.status_code == 200:
                 data = resp.json()
                 try:
                     parts = data["candidates"][0]["content"]["parts"]
-                    # Look for inline image (support both key styles)
                     for part in parts:
-                        inline = part.get("inlineData") or part.get("inline_data")
-                        if inline and (inline.get("data") or inline.get("data") == ""):
-                            b64_image = inline.get("data")
-                            if b64_image:
-                                out_mime = inline.get("mimeType") or inline.get("mime_type") or "image/png"
-                                return self._write_json({
-                                    'success': True,
-                                    'image': {
-                                        'dataUrl': f'data:{out_mime};base64,{b64_image}',
-                                        'mimeType': out_mime,
-                                    }
-                                }, 200)
-                    # If only text parts present, return diagnostic text
+                        inline = part.get("inline_data") or part.get("inlineData")
+                        if inline and inline.get("data"):
+                            b64_image = inline["data"]
+                            out_mime = inline.get("mime_type") or inline.get("mimeType") or "image/png"
+                            return self._write_json({
+                                'success': True,
+                                'image': {
+                                    'dataUrl': f'data:{out_mime};base64,{b64_image}',
+                                    'mimeType': out_mime,
+                                }
+                            }, 200)
                     texts = [p.get("text") for p in parts if p.get("text")]
                     if texts:
-                        return self._write_json({'error': texts[0] or 'No image generated'}, 500)
+                        return self._write_json({'error': texts[0] or 'No image generated', 'details': data}, 500)
                 except Exception:
                     pass
-                return self._write_json({'error': 'No image generated'}, 500)
-
-            elif resp.status_code == 429:
-                retry_after = resp.headers.get('retry-after')
-                secs = int(retry_after) if retry_after and retry_after.isdigit() else None
-                return self._write_json({
-                    'success': False,
-                    'error': 'Rate limit exceeded. Please try again later.',
-                    'errorCode': 'RATE_LIMIT_ERROR',
-                    'retryAfterSec': secs,
-                }, 429)
+                return self._write_json({'error': 'No image generated', 'details': data}, 500)
             else:
-                # Forward error details for debugging
+                # Return full error details for debugging
+                details = None
                 try:
-                    err_json = resp.json()
+                    details = resp.json()
                 except Exception:
-                    err_json = {'message': resp.text}
+                    details = {'raw': resp.text}
+                status = 429 if resp.status_code == 429 else 500 if resp.status_code >= 500 else 400
                 return self._write_json({
                     'success': False,
                     'error': f'Gemini HTTP {resp.status_code}',
-                    'details': err_json,
-                }, 500)
+                    'details': details,
+                }, status)
         except Exception as e:
             return self._write_json({'error': f'Gemini error: {str(e)}'}, 500)
