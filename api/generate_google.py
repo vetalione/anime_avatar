@@ -1,7 +1,6 @@
 import base64
 import json
 import os
-import mimetypes
 from google import genai
 from google.genai import types
 
@@ -15,8 +14,9 @@ CORS_HEADERS = {
 }
 
 def _response(payload, status=200, headers=None):
-    h = {**CORS_HEADERS, **(headers or {})}
-    return (json.dumps(payload), status, h)
+    merged = {**CORS_HEADERS, **(headers or {})}
+    return (json.dumps(payload), status, merged)
+
 
 def handler(request):
     # CORS preflight
@@ -26,12 +26,15 @@ def handler(request):
     if request.method != "POST":
         return _response({"error": "Method not allowed"}, 405)
 
-    # Parse JSON
+    # Parse JSON body
     try:
         body = request.get_json(silent=True) or {}
     except Exception:
         try:
-            body = json.loads(getattr(request, "data", b"{}") or b"{}")
+            raw = getattr(request, "data", b"{}") or b"{}"
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8", errors="ignore")
+            body = json.loads(raw or "{}")
         except Exception:
             body = {}
 
@@ -42,7 +45,7 @@ def handler(request):
     if not image_base64 or not anime_title:
         return _response({"error": "Missing required fields: imageBase64 and animeTitle"}, 400)
 
-    # Decode data URL
+    # Decode data URL to bytes and detect mime type
     mime_type = "image/jpeg"
     try:
         if isinstance(image_base64, str) and image_base64.startswith("data:"):
@@ -76,19 +79,19 @@ def handler(request):
     try:
         client = genai.Client(api_key=GEMINI_API_KEY)
         contents = [types.Content(role="user", parts=parts)]
-        config = types.GenerateContentConfig(response_modalities=["IMAGE"])
+        config = types.GenerateContentConfig(response_modalities=["IMAGE"])  # image only
         result = client.models.generate_content(
             model=MODEL_ID,
             contents=contents,
             config=config,
         )
 
-        # Extract first image from parts
-        if not result.candidates:
+        if not getattr(result, "candidates", None):
             return _response({"error": "No candidates returned"}, 500)
 
-        for part in result.candidates[0].content.parts:
-            inline = getattr(part, "inline_data", None)
+        # Find first inline image
+        for p in result.candidates[0].content.parts:
+            inline = getattr(p, "inline_data", None)
             if inline and inline.data:
                 out_mime = inline.mime_type or "image/png"
                 b64_image = base64.b64encode(inline.data).decode("utf-8")
