@@ -2,8 +2,6 @@ import React, { useState, useEffect } from 'react'
 import './App.css'
 import { translations } from './translations'
 import { Translations, Language } from './types'
-import { GoogleGenerativeAI } from '@google/generative-ai'
-import OpenAI from 'openai'
 
 function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
@@ -42,11 +40,7 @@ function App() {
       return
     }
 
-    console.log('🚀 Starting avatar generation...')
-    console.log('🔑 API Keys status:', {
-      googleAI: !!import.meta.env.VITE_GOOGLE_AI_API_KEY ? 'Present' : 'Missing',
-      openAI: !!import.meta.env.VITE_OPENAI_API_KEY ? 'Present' : 'Missing'
-    })
+    console.log('🚀 Starting avatar generation via Google Gemini endpoint...')
 
     setIsGenerating(true)
     setGenerationStatus(t.alerts.analyzing)
@@ -60,108 +54,35 @@ function App() {
       })
       
       setGenerationStatus(t.alerts.generating)
-      
-      // Проверяем среду выполнения
-      const isLocalDevelopment = window.location.hostname === 'localhost'
-      
-      if (isLocalDevelopment) {
-        console.log('💻 Running locally - using direct API calls')
-        
-        // Локальная разработка: прямые вызовы API
-        const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GOOGLE_AI_API_KEY)
-        const openai = new OpenAI({
-          apiKey: import.meta.env.VITE_OPENAI_API_KEY,
-          dangerouslyAllowBrowser: true
-        })
+      console.log('🌐 Calling /api/generate_google')
 
-        console.log('🔍 Starting Gemini analysis...')
-        
-        const analysisPrompt = `Analyze this photo and describe the person's key facial features, expression, and overall appearance in detail. Focus on features that would be important for creating an anime avatar.`
-        
-        const imagePart = {
-          inlineData: {
-            data: imageBase64.split(',')[1],
-            mimeType: selectedFile.type,
-          },
-        }
-        
-        let personDescription;
-        try {
-          // Попробуем использовать gemini-1.5-pro для анализа изображения
-          const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" })
-          const analysisResult = await model.generateContent([analysisPrompt, imagePart])
-          const analysisResponse = await analysisResult.response
-          personDescription = analysisResponse.text()
-          console.log('👤 Gemini image analysis completed')
-        } catch (visionError) {
-          console.log('⚠️ Image analysis failed, using text-only approach...')
-          console.log('Vision error:', visionError)
-          // Fallback: используем только текстовую модель без анализа изображения
-          const textModel = genAI.getGenerativeModel({ model: "gemini-pro" })
-          const fallbackPrompt = `Create a detailed description for an anime character that would fit well in the ${animeTitle} universe. Include details about hair color, eye shape, facial features, and expression that would make a compelling anime avatar.`
-          
-          const textResult = await textModel.generateContent(fallbackPrompt)
-          const textResponse = await textResult.response
-          personDescription = textResponse.text()
-          console.log('👤 Text-based character description created')
-        }
-
-        // Создаем промпт для DALL-E
-        const basePrompt = `Create a high-quality anime avatar in ${animeTitle} art style`
-        const characterPrompt = animeCharacter ? ` resembling ${animeCharacter}` : ''
-        const featuresPrompt = ` based on these characteristics: ${personDescription}`
-        const stylePrompt = `. Style: vibrant colors, detailed anime/manga illustration, professional digital art, ${animeTitle} aesthetic, beautiful lighting, masterpiece quality`
-        
-        const dallePrompt = (basePrompt + characterPrompt + featuresPrompt + stylePrompt).substring(0, 1000)
-        
-        console.log('🎨 Starting DALL-E generation...')
-        const imageResponse = await openai.images.generate({
-          model: "dall-e-3",
-          prompt: dallePrompt,
-          n: 1,
-          size: "1024x1024",
-          quality: "hd",
-          style: "vivid"
+      const response = await fetch('/api/generate_google', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageBase64,
+          animeTitle,
+          animeCharacter,
         })
-        
-        const generatedImageUrl = imageResponse.data?.[0]?.url
-        
-        if (generatedImageUrl) {
-          setGeneratedAvatar(generatedImageUrl)
-          console.log('✅ Avatar generated successfully!')
-        } else {
-          throw new Error('No image URL received from DALL-E')
-        }
-        
+      })
+
+      if (!response.ok) {
+        throw new Error(`API error: ${response.status} ${response.statusText}`)
+      }
+
+      const data = await response.json()
+
+      if (data.success && data.image?.dataUrl) {
+        setGeneratedAvatar(data.image.dataUrl)
+        console.log('✅ Avatar generated via Google Gemini!')
+      } else if (data.images && Array.isArray(data.images) && data.images[0]?.data) {
+        // Fallback to previous shape if returned as array
+        const first = data.images[0]
+        const dataUrl = `data:${first.mime_type || 'image/png'};base64,${first.data}`
+        setGeneratedAvatar(dataUrl)
+        console.log('✅ Avatar generated via Google Gemini (array payload)!')
       } else {
-        console.log('🌐 Running on production - using Vercel API')
-        
-        // Продакшен: используем Vercel API функцию
-        const response = await fetch('/api/generate-avatar', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            imageBase64,
-            animeTitle,
-            animeCharacter,
-            language
-          })
-        })
-        
-        if (!response.ok) {
-          throw new Error(`API error: ${response.status} ${response.statusText}`)
-        }
-        
-        const data = await response.json()
-        
-        if (data.success && data.imageUrl) {
-          setGeneratedAvatar(data.imageUrl)
-          console.log('✅ Avatar generated via API!')
-        } else {
-          throw new Error(data.error || 'Failed to generate avatar')
-        }
+        throw new Error(data.error || 'Failed to generate avatar')
       }
       
     } catch (error) {
@@ -171,8 +92,8 @@ function App() {
       if (error instanceof Error) {
         if (error.message.includes('billing') || error.message.includes('BILLING_ERROR')) {
           errorMessage = language === 'ru' 
-            ? 'Ошибка биллинга OpenAI. Проверьте баланс аккаунта.' 
-            : 'OpenAI billing error. Please check your account balance.'
+            ? 'Ошибка биллинга. Проверьте баланс аккаунта.' 
+            : 'Billing error. Please check your account balance.'
         } else if (error.message.includes('rate_limit') || error.message.includes('RATE_LIMIT_ERROR')) {
           errorMessage = language === 'ru'
             ? 'Превышен лимит запросов. Попробуйте позже.'
@@ -200,7 +121,7 @@ function App() {
             className="language-button"
             aria-label="Switch language"
           >
-            {language === 'ru' ? '🇺🇸 EN' : '🇷� RU'}
+            {language === 'ru' ? '🇺🇸 EN' : '🇷🇺 RU'}
           </button>
         </div>
         <h1>{t.header.title}</h1>
