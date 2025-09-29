@@ -1,51 +1,38 @@
 import base64
-import json
 import os
 from google import genai
 from google.genai import types
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 MODEL_ID = "gemini-2.5-flash-image-preview"
 
-CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-}
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def _response(payload, status=200, headers=None):
-    merged = {**CORS_HEADERS, **(headers or {})}
-    return (json.dumps(payload), status, merged)
-
-
-def handler(request):
-    # CORS preflight
-    if request.method == "OPTIONS":
-        return ("", 200, CORS_HEADERS)
-
-    if request.method != "POST":
-        return _response({"error": "Method not allowed"}, 405)
-
-    # Parse JSON body
+@app.post("/")
+async def generate_google(request: Request):
     try:
-        body = request.get_json(silent=True) or {}
+        body = await request.json()
     except Exception:
-        try:
-            raw = getattr(request, "data", b"{}") or b"{}"
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8", errors="ignore")
-            body = json.loads(raw or "{}")
-        except Exception:
-            body = {}
+        body = {}
 
     image_base64 = body.get("imageBase64")
     anime_title = body.get("animeTitle")
     anime_character = body.get("animeCharacter")
 
     if not image_base64 or not anime_title:
-        return _response({"error": "Missing required fields: imageBase64 and animeTitle"}, 400)
+        return JSONResponse({"error": "Missing required fields: imageBase64 and animeTitle"}, status_code=400)
 
-    # Decode data URL to bytes and detect mime type
+    # Decode data URL to bytes and detect mime
     mime_type = "image/jpeg"
     try:
         if isinstance(image_base64, str) and image_base64.startswith("data:"):
@@ -58,9 +45,8 @@ def handler(request):
         else:
             image_bytes = base64.b64decode(image_base64)
     except Exception:
-        return _response({"error": "Invalid imageBase64"}, 400)
+        return JSONResponse({"error": "Invalid imageBase64"}, status_code=400)
 
-    # Build prompt
     instruction = (
         "Analyze the provided selfie and extract the person's key facial features, hair color/length/shape, "
         "eye shape/color, skin tone, face structure, and expression. Infer the person's gender from the selfie "
@@ -87,15 +73,15 @@ def handler(request):
         )
 
         if not getattr(result, "candidates", None):
-            return _response({"error": "No candidates returned"}, 500)
+            return JSONResponse({"error": "No candidates returned"}, status_code=500)
 
-        # Find first inline image
-        for p in result.candidates[0].content.parts:
-            inline = getattr(p, "inline_data", None)
+        # find first inline image
+        for part in result.candidates[0].content.parts:
+            inline = getattr(part, "inline_data", None)
             if inline and inline.data:
                 out_mime = inline.mime_type or "image/png"
                 b64_image = base64.b64encode(inline.data).decode("utf-8")
-                return _response({
+                return JSONResponse({
                     "success": True,
                     "image": {
                         "dataUrl": f"data:{out_mime};base64,{b64_image}",
@@ -103,6 +89,6 @@ def handler(request):
                     }
                 })
 
-        return _response({"error": "No image generated"}, 500)
+        return JSONResponse({"error": "No image generated"}, status_code=500)
     except Exception as e:
-        return _response({"error": f"Gemini error: {str(e)}"}, 500)
+        return JSONResponse({"error": f"Gemini error: {str(e)}"}, status_code=500)
