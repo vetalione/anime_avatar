@@ -42,6 +42,12 @@ function App() {
       return
     }
 
+    console.log('🚀 Starting avatar generation...')
+    console.log('🔑 API Keys status:', {
+      googleAI: !!import.meta.env.VITE_GOOGLE_AI_API_KEY ? 'Present' : 'Missing',
+      openAI: !!import.meta.env.VITE_OPENAI_API_KEY ? 'Present' : 'Missing'
+    })
+
     setIsGenerating(true)
     setGenerationStatus(t.alerts.analyzing)
     
@@ -55,51 +61,22 @@ function App() {
       
       setGenerationStatus(t.alerts.generating)
       
-      // Проверяем, работаем ли мы в продакшене (Vercel) или локально
-      const isProduction = window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1'
+      // Проверяем среду выполнения
+      const isLocalDevelopment = window.location.hostname === 'localhost'
       
-      if (isProduction) {
-        // Продакшен: используем Vercel API функцию
-        console.log('🌐 Using Vercel API function...')
-        const response = await fetch('/api/generate-avatar', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            imageBase64,
-            animeTitle,
-            animeCharacter,
-            language
-          })
-        })
+      if (isLocalDevelopment) {
+        console.log('💻 Running locally - using direct API calls')
         
-        const data = await response.json()
-        
-        if (data.success && data.imageUrl) {
-          setGeneratedAvatar(data.imageUrl)
-          console.log('✅ Avatar generated successfully via API!')
-          if (data.analysis) {
-            console.log('👤 Character analysis:', data.analysis)
-          }
-        } else {
-          throw new Error(data.error || 'Failed to generate avatar')
-        }
-      } else {
         // Локальная разработка: прямые вызовы API
-        console.log('💻 Using direct API calls for local development...')
-        
-        // Инициализируем AI сервисы
         const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GOOGLE_AI_API_KEY)
         const openai = new OpenAI({
           apiKey: import.meta.env.VITE_OPENAI_API_KEY,
           dangerouslyAllowBrowser: true
         })
 
-        // Шаг 1: Анализируем фото с Gemini
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" })
+        console.log('🔍 Starting Gemini analysis...')
         
-        const analysisPrompt = `Analyze this photo and describe the person's key facial features, expression, and overall appearance in detail. Focus on features that would be important for creating an anime avatar. Be specific about hair color, eye shape, face structure, and expression.`
+        const analysisPrompt = `Analyze this photo and describe the person's key facial features, expression, and overall appearance in detail. Focus on features that would be important for creating an anime avatar.`
         
         const imagePart = {
           inlineData: {
@@ -108,24 +85,36 @@ function App() {
           },
         }
         
-        console.log('🔍 Analyzing image with Gemini...')
-        const analysisResult = await model.generateContent([analysisPrompt, imagePart])
-        const analysisResponse = await analysisResult.response
-        const personDescription = analysisResponse.text()
-        
-        console.log('👤 Person analysis:', personDescription)
+        let personDescription;
+        try {
+          // Попробуем использовать gemini-1.5-pro для анализа изображения
+          const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" })
+          const analysisResult = await model.generateContent([analysisPrompt, imagePart])
+          const analysisResponse = await analysisResult.response
+          personDescription = analysisResponse.text()
+          console.log('👤 Gemini image analysis completed')
+        } catch (visionError) {
+          console.log('⚠️ Image analysis failed, using text-only approach...')
+          console.log('Vision error:', visionError)
+          // Fallback: используем только текстовую модель без анализа изображения
+          const textModel = genAI.getGenerativeModel({ model: "gemini-pro" })
+          const fallbackPrompt = `Create a detailed description for an anime character that would fit well in the ${animeTitle} universe. Include details about hair color, eye shape, facial features, and expression that would make a compelling anime avatar.`
+          
+          const textResult = await textModel.generateContent(fallbackPrompt)
+          const textResponse = await textResult.response
+          personDescription = textResponse.text()
+          console.log('👤 Text-based character description created')
+        }
 
-        // Шаг 2: Создаем промпт для DALL-E
+        // Создаем промпт для DALL-E
         const basePrompt = `Create a high-quality anime avatar in ${animeTitle} art style`
         const characterPrompt = animeCharacter ? ` resembling ${animeCharacter}` : ''
         const featuresPrompt = ` based on these characteristics: ${personDescription}`
-        const stylePrompt = `. Style: vibrant colors, detailed anime/manga illustration, professional digital art, ${animeTitle} aesthetic, beautiful lighting, masterpiece quality, sharp focus`
+        const stylePrompt = `. Style: vibrant colors, detailed anime/manga illustration, professional digital art, ${animeTitle} aesthetic, beautiful lighting, masterpiece quality`
         
         const dallePrompt = (basePrompt + characterPrompt + featuresPrompt + stylePrompt).substring(0, 1000)
         
-        console.log('🎨 DALL-E prompt:', dallePrompt)
-        
-        // Шаг 3: Генерируем изображение с DALL-E 3
+        console.log('🎨 Starting DALL-E generation...')
         const imageResponse = await openai.images.generate({
           model: "dall-e-3",
           prompt: dallePrompt,
@@ -139,9 +128,39 @@ function App() {
         
         if (generatedImageUrl) {
           setGeneratedAvatar(generatedImageUrl)
-          console.log('✅ Avatar generated successfully via direct API!')
+          console.log('✅ Avatar generated successfully!')
         } else {
           throw new Error('No image URL received from DALL-E')
+        }
+        
+      } else {
+        console.log('🌐 Running on production - using Vercel API')
+        
+        // Продакшен: используем Vercel API функцию
+        const response = await fetch('/api/generate-avatar', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            imageBase64,
+            animeTitle,
+            animeCharacter,
+            language
+          })
+        })
+        
+        if (!response.ok) {
+          throw new Error(`API error: ${response.status} ${response.statusText}`)
+        }
+        
+        const data = await response.json()
+        
+        if (data.success && data.imageUrl) {
+          setGeneratedAvatar(data.imageUrl)
+          console.log('✅ Avatar generated via API!')
+        } else {
+          throw new Error(data.error || 'Failed to generate avatar')
         }
       }
       
@@ -150,7 +169,7 @@ function App() {
       let errorMessage = t.alerts.generationError
       
       if (error instanceof Error) {
-        if (error.message.includes('billing') || error.message.includes('BILLING_ERROR') || error.message.includes('insufficient_quota')) {
+        if (error.message.includes('billing') || error.message.includes('BILLING_ERROR')) {
           errorMessage = language === 'ru' 
             ? 'Ошибка биллинга OpenAI. Проверьте баланс аккаунта.' 
             : 'OpenAI billing error. Please check your account balance.'
@@ -162,14 +181,6 @@ function App() {
           errorMessage = language === 'ru'
             ? 'Нарушение политики контента. Попробуйте другое изображение.'
             : 'Content policy violation. Please try a different image.'
-        } else if (error.message.includes('invalid_api_key')) {
-          errorMessage = language === 'ru'
-            ? 'Неверный API ключ. Проверьте настройки.'
-            : 'Invalid API key. Please check your settings.'
-        } else if (error.message.includes('Failed to fetch') || error.message.includes('network')) {
-          errorMessage = language === 'ru'
-            ? 'Ошибка сети. Проверьте подключение к интернету.'
-            : 'Network error. Please check your internet connection.'
         }
       }
       
