@@ -3,12 +3,12 @@ import json
 import os
 import time
 import random
+import requests
 from http.server import BaseHTTPRequestHandler
-from google import genai
-from google.genai import types
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 MODEL_ID = "gemini-2.5-flash-image-preview"
+API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_ID}:generateContent"
 
 class handler(BaseHTTPRequestHandler):
     def _set_headers(self, status=200, extra=None):
@@ -32,6 +32,9 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
+            if not GEMINI_API_KEY:
+                return self._write_json({'error': 'GEMINI_API_KEY is not configured'}, 500)
+
             length = int(self.headers.get('content-length', 0))
             raw_body = self.rfile.read(length) if length else b'{}'
             try:
@@ -61,7 +64,6 @@ class handler(BaseHTTPRequestHandler):
             except Exception:
                 return self._write_json({'error': 'Invalid imageBase64'}, 400)
 
-            # Build prompt
             instruction = (
                 "Analyze the provided selfie and extract the person's key facial features, hair color/length/shape, "
                 "eye shape/color, skin tone, face structure, and expression. Infer the person's gender from the selfie "
@@ -72,86 +74,82 @@ class handler(BaseHTTPRequestHandler):
                 "No text, no watermark, no signature. Upper body portrait on a clean simple background. High resolution, professional digital art, masterpiece quality."
             )
 
-            parts = [
-                types.Part.from_text(text=instruction),
-                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-            ]
+            payload = {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [
+                            {"text": instruction},
+                            {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode("utf-8")}},
+                        ],
+                    }
+                ],
+                "generation_config": {
+                    "candidate_count": 1,
+                },
+            }
 
-            client = genai.Client(api_key=GEMINI_API_KEY)
-            contents = [types.Content(role='user', parts=parts)]
-            config = types.GenerateContentConfig(response_modalities=['IMAGE'])
+            headers = {
+                "x-goog-api-key": GEMINI_API_KEY,
+                "Content-Type": "application/json",
+            }
 
-            # Retry with exponential backoff on 429 (short to avoid hammering)
+            # Retry with exponential backoff on 429
             delay = 1.0
             max_retries = 2
-            last_error = None
-            result = None
             for attempt in range(max_retries):
-                try:
-                    result = client.models.generate_content(
-                        model=MODEL_ID,
-                        contents=contents,
-                        config=config,
-                    )
-                    last_error = None
-                    break
-                except Exception as e:
-                    status = getattr(getattr(e, 'response', None), 'status_code', None)
-                    retry_after = None
+                resp = requests.post(API_URL, headers=headers, json=payload, timeout=60)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    # Parse first inline image
                     try:
-                        retry_after = getattr(getattr(e, 'response', None), 'headers', {}).get('retry-after')
+                        parts = data["candidates"][0]["content"]["parts"]
+                        for part in parts:
+                            inline = part.get("inline_data")
+                            if inline and inline.get("data"):
+                                out_mime = inline.get("mime_type", "image/png")
+                                b64_image = inline["data"]
+                                return self._write_json({
+                                    'success': True,
+                                    'image': {
+                                        'dataUrl': f'data:{out_mime};base64,{b64_image}',
+                                        'mimeType': out_mime,
+                                    }
+                                }, 200)
+                        # If there is text only
+                        text_parts = [p.get("text") for p in parts if p.get("text")]
+                        if text_parts:
+                            return self._write_json({'error': text_parts[0] or 'No image generated'}, 500)
                     except Exception:
-                        retry_after = None
-                    message = str(e)
-                    if status == 429 or '429' in message or 'Too Many Requests' in message:
-                        last_error = e
-                        if attempt < max_retries - 1:
-                            time.sleep(delay + random.uniform(0, 0.25))
-                            delay *= 2
-                            continue
-                        else:
-                            # Return explicit 429 with retryAfterSec when available
-                            secs = None
-                            try:
-                                if retry_after is not None:
-                                    secs = int(retry_after)
-                            except Exception:
-                                secs = None
-                            self._set_headers(429)
-                            self.wfile.write(json.dumps({
-                                'success': False,
-                                'error': 'Rate limit exceeded. Please try again later.',
-                                'errorCode': 'RATE_LIMIT_ERROR',
-                                'retryAfterSec': secs
-                            }).encode('utf-8'))
-                            return
-                    else:
-                        self._set_headers(500)
-                        self.wfile.write(json.dumps({
-                            'success': False,
-                            'error': f'Gemini error: {message}'
-                        }).encode('utf-8'))
-                        return
-
-            if last_error is not None:
-                return self._write_json({'error': 'Failed after retries'}, 500)
-
-            if not getattr(result, 'candidates', None):
-                return self._write_json({'error': 'No candidates returned'}, 500)
-
-            for p in result.candidates[0].content.parts:
-                inline = getattr(p, 'inline_data', None)
-                if inline and inline.data:
-                    out_mime = inline.mime_type or 'image/png'
-                    b64_image = base64.b64encode(inline.data).decode('utf-8')
+                        pass
+                    return self._write_json({'error': 'No image generated'}, 500)
+                elif resp.status_code == 429 and attempt < max_retries - 1:
+                    retry_after = resp.headers.get('retry-after')
+                    wait = float(retry_after) if retry_after and retry_after.isdigit() else (delay + random.uniform(0, 0.25))
+                    time.sleep(wait)
+                    delay *= 2
+                    continue
+                elif resp.status_code == 429:
+                    retry_after = resp.headers.get('retry-after')
+                    secs = int(retry_after) if retry_after and retry_after.isdigit() else None
                     return self._write_json({
-                        'success': True,
-                        'image': {
-                            'dataUrl': f'data:{out_mime};base64,{b64_image}',
-                            'mimeType': out_mime,
-                        }
-                    }, 200)
+                        'success': False,
+                        'error': 'Rate limit exceeded. Please try again later.',
+                        'errorCode': 'RATE_LIMIT_ERROR',
+                        'retryAfterSec': secs,
+                    }, 429)
+                else:
+                    # Forward error details for debugging
+                    try:
+                        err_json = resp.json()
+                    except Exception:
+                        err_json = {'message': resp.text}
+                    return self._write_json({
+                        'success': False,
+                        'error': f'Gemini HTTP {resp.status_code}',
+                        'details': err_json,
+                    }, 500)
 
-            return self._write_json({'error': 'No image generated'}, 500)
+            return self._write_json({'error': 'Failed after retries'}, 500)
         except Exception as e:
             return self._write_json({'error': f'Gemini error: {str(e)}'}, 500)
